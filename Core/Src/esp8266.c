@@ -1,18 +1,63 @@
 #include "esp8266.h"
+#include <string.h>
 #include <stdint.h>
+
+#define ESP_RESPONSE_TIMEOUT 5000
+#define ESP_MAX_RESPONSE_LEN 512
 
 static void ESP_DelayMs(uint32_t ms)
 {
   HAL_Delay(ms);
 }
 
-void ESP_SendCommand(char *cmd)
+// Enhanced command sending with response checking
+uint8_t ESP_SendCommand(char *cmd)
 {
   if (cmd == NULL) {
-    return;
+    return 0;
   }
+  
+  // Clear UART receive buffer
+  uint8_t dummy;
+  while (HAL_UART_Receive(&huart1, &dummy, 1, 10) == HAL_OK);
+  
+  // Send command
   size_t len = strlen(cmd);
-  (void)HAL_UART_Transmit(&huart1, (uint8_t *)cmd, (uint16_t)len, 1000);
+  if (HAL_UART_Transmit(&huart1, (uint8_t *)cmd, (uint16_t)len, 1000) != HAL_OK) {
+    return 0;
+  }
+  
+  return 1;
+}
+
+// Check for specific response
+uint8_t ESP_WaitForResponse(const char* expected, uint32_t timeout)
+{
+  char response[ESP_MAX_RESPONSE_LEN] = {0};
+  uint16_t index = 0;
+  uint32_t start_time = HAL_GetTick();
+  
+  while ((HAL_GetTick() - start_time) < timeout) {
+    uint8_t byte;
+    if (HAL_UART_Receive(&huart1, &byte, 1, 100) == HAL_OK) {
+      if (index < ESP_MAX_RESPONSE_LEN - 1) {
+        response[index++] = byte;
+        
+        // Check if we received the expected response
+        if (strstr(response, expected) != NULL) {
+          return 1;
+        }
+        
+        // Check for error responses
+        if (strstr(response, "ERROR") != NULL || 
+            strstr(response, "FAIL") != NULL) {
+          return 0;
+        }
+      }
+    }
+  }
+  
+  return 0; // Timeout
 }
 
 static void ESP_SendBinary(const uint8_t *data, uint16_t len)
@@ -125,35 +170,62 @@ static size_t mqtt_build_publish(uint8_t *out, size_t outSize,
   return o;
 }
 
-void ESP_Init(void)
+uint8_t ESP_Init(void)
 {
   // Basic init sequence for ESP8266 with AT firmware over USART1
   // NOTE: Replace <SSID> and <PASSWORD> with your WiFi credentials
   // Broker: b2a051ac43c4410e86861ed01b937dec.s1.eu.hivemq.cloud
 
-  ESP_SendCommand("AT\r\n");
+  // Step 1: Test communication
+  if (!ESP_SendCommand("AT\r\n") || !ESP_WaitForResponse("OK", 2000)) {
+    return 0; // ESP not responding
+  }
   ESP_DelayMs(500);
 
-  ESP_SendCommand("ATE0\r\n"); // echo off
+  // Step 2: Disable echo
+  if (!ESP_SendCommand("ATE0\r\n") || !ESP_WaitForResponse("OK", 1000)) {
+    return 0;
+  }
   ESP_DelayMs(200);
 
-  ESP_SendCommand("AT+CWMODE=1\r\n"); // station mode
+  // Step 3: Set to station mode
+  if (!ESP_SendCommand("AT+CWMODE=1\r\n") || !ESP_WaitForResponse("OK", 1000)) {
+    return 0;
+  }
   ESP_DelayMs(200);
 
-  // Join WiFi (fill in your SSID and password)
-  ESP_SendCommand("AT+CWJAP=\"bawang\",\"12345678\"\r\n");
-  ESP_DelayMs(5000);
+  // Step 4: Join WiFi network
+  if (!ESP_SendCommand("AT+CWJAP=\"bawang\",\"12345678\"\r\n")) {
+    return 0;
+  }
+  
+  // Wait for WiFi connection (can take longer)
+  if (!ESP_WaitForResponse("WIFI CONNECTED", 10000)) {
+    return 0; // Failed to connect to WiFi
+  }
+  
+  if (!ESP_WaitForResponse("WIFI GOT IP", 5000)) {
+    return 0; // Failed to get IP
+  }
+  ESP_DelayMs(1000);
 
-  // Enable SSL for subsequent TCP connections
-  ESP_SendCommand("AT+CIPSSL=1\r\n");
+  // Step 5: Enable SSL for subsequent TCP connections
+  if (!ESP_SendCommand("AT+CIPSSL=1\r\n") || !ESP_WaitForResponse("OK", 1000)) {
+    return 0;
+  }
   ESP_DelayMs(200);
 
-  // Start SSL TCP to HiveMQ (port 8883). This only opens a socket;
-  // implementing MQTT packets is required for full MQTT over AT without native MQTT commands.
-  ESP_SendCommand("AT+CIPSTART=\"SSL\",\"b2a051ac43c4410e86861ed01b937dec.s1.eu.hivemq.cloud\",8883\r\n");
-  ESP_DelayMs(3000);
+  // Step 6: Start SSL TCP to HiveMQ (port 8883)
+  if (!ESP_SendCommand("AT+CIPSTART=\"SSL\",\"b2a051ac43c4410e86861ed01b937dec.s1.eu.hivemq.cloud\",8883\r\n")) {
+    return 0;
+  }
+  
+  if (!ESP_WaitForResponse("CONNECT", 5000)) {
+    return 0; // Failed to connect to MQTT broker
+  }
+  ESP_DelayMs(1000);
 
-  // Build and send MQTT CONNECT
+  // Step 7: Build and send MQTT CONNECT
   const char *clientId = "stm32-01";
   const char *username = "user1";
   const char *password = "P@ssw0rd";
@@ -164,7 +236,7 @@ void ESP_Init(void)
     ESP_DelayMs(1500);
   }
 
-  // Publish one sample telemetry message to devices/stm32-01/telemetry
+  // Step 8: Publish one sample telemetry message
   const char *topic = "devices/stm32-01/telemetry";
   const char *payload = "{\"pressure\":820,\"soilTemp\":36,\"soilHumidity\":72,\"waterLevel\":18,\"airTemp\":34,\"airHumidity\":70}";
   pktLen = mqtt_build_publish(packet, sizeof(packet), topic, payload);
@@ -172,6 +244,37 @@ void ESP_Init(void)
     ESP_SendBinary(packet, (uint16_t)pktLen);
     ESP_DelayMs(500);
   }
+
+  return 1; // Success
+}
+
+// Test basic ESP01 communication
+uint8_t ESP_TestConnection(void)
+{
+  ESP_DelayMs(1000); // Give ESP time to boot
+  
+  // Test basic AT command
+  if (!ESP_SendCommand("AT\r\n")) {
+    return 0;
+  }
+  
+  return ESP_WaitForResponse("OK", 2000);
+}
+
+// Get and print WiFi connection information
+void ESP_PrintWiFiInfo(void)
+{
+  // Get IP address
+  ESP_SendCommand("AT+CIFSR\r\n");
+  ESP_DelayMs(1000);
+  
+  // Get connection status
+  ESP_SendCommand("AT+CWJAP?\r\n");
+  ESP_DelayMs(1000);
+  
+  // Get signal strength
+  ESP_SendCommand("AT+CWLAP\r\n");
+  ESP_DelayMs(2000);
 }
 
 

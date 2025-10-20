@@ -1,6 +1,5 @@
-../Core/Src/main.c:68:5:main	8	static
-../Core/Src/main.c:115:6:SystemClock_Config	88	static
-../Core/Src/main.c:157:6:MX_USART1_UART_Init	8	static
-../Core/Src/main.c:190:6:MX_USART2_UART_Init	8	static
-../Core/Src/main.c:223:13:MX_GPIO_Init	16	static
-../Core/Src/main.c:245:6:Error_Handler	4	static,ignoring_inline_asm
+../Core/Src/main.c:68:5:main	1848	static
+../Core/Src/main.c:286:6:SystemClock_Config	88	static
+../Core/Src/main.c:333:13:MX_USART1_UART_Init	8	static
+../Core/Src/main.c:366:13:MX_GPIO_Init	40	static
+../Core/Src/main.c:401:6:Error_Handler	4	static,ignoring_inline_asm
