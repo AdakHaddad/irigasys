@@ -115,11 +115,75 @@ int main(void)
       HAL_Delay(500); // small delay after sending data
   }
 
+  void ESP01_CheckMQTTSupport(void) {
+      // Check if ESP8266 supports MQTT AT commands
+      send_and_receive("AT+MQTTUSERCFG=?\r\n", 2000);
+      send_and_receive("AT+MQTTCONN=?\r\n", 2000);
+      send_and_receive("AT+CIPSSL=?\r\n", 2000);
+  }
+
+  void ESP01_ConnectMQTTBroker_Auth(const char *broker, uint16_t port, const char *username, const char *password) {
+      char cmd[128];
+      
+      // Set MQTT username and password
+      snprintf(cmd, sizeof(cmd), "AT+MQTTUSERCFG=0,1,\"%s\",\"%s\",\"%s\",0,0,\"\"\r\n", 
+               "STM32Client", username, password);
+      send_and_receive(cmd, 2000);
+      
+      // Connect to MQTT broker
+      snprintf(cmd, sizeof(cmd), "AT+MQTTCONN=0,\"%s\",%d,1\r\n", broker, port);
+      send_and_receive(cmd, 5000);
+  }
+
   void ESP01_ConnectMQTTBroker(const char *broker, uint16_t port) {
       char cmd[128];
       snprintf(cmd, sizeof(cmd),
                "AT+CIPSTART=\"TCP\",\"%s\",%d\r\n", broker, port);
       send_AT(cmd, 5000);
+  }
+
+  void ESP01_Send_MQTT_CONNECT_Auth(const char *clientID, const char *username, const char *password) {
+      uint8_t packet[256];
+      uint8_t clientID_len = strlen(clientID);
+      uint8_t username_len = strlen(username);
+      uint8_t password_len = strlen(password);
+      
+      // Calculate total length: Fixed header (10) + client ID (2 + len) + username (2 + len) + password (2 + len)
+      uint8_t total_len = 10 + 2 + clientID_len + 2 + username_len + 2 + password_len;
+
+      uint8_t index = 0;
+      packet[index++] = 0x10;                      // CONNECT command
+      packet[index++] = total_len;                 // Remaining length
+      packet[index++] = 0x00; packet[index++] = 0x04; // Length of "MQTT"
+      packet[index++] = 'M'; packet[index++] = 'Q';
+      packet[index++] = 'T'; packet[index++] = 'T';
+      packet[index++] = 0x04;                      // Protocol level 4
+      packet[index++] = 0xC2;                      // Connect flags: Clean session + Username + Password
+      packet[index++] = 0x00; packet[index++] = 0x3C; // Keep alive = 60 sec
+      
+      // Client ID
+      packet[index++] = 0x00; packet[index++] = clientID_len;
+      memcpy(&packet[index], clientID, clientID_len);
+      index += clientID_len;
+      
+      // Username
+      packet[index++] = 0x00; packet[index++] = username_len;
+      memcpy(&packet[index], username, username_len);
+      index += username_len;
+      
+      // Password
+      packet[index++] = 0x00; packet[index++] = password_len;
+      memcpy(&packet[index], password, password_len);
+      index += password_len;
+
+      // Send CIPSEND first
+      char sendCmd[32];
+      snprintf(sendCmd, sizeof(sendCmd),
+               "AT+CIPSEND=%d\r\n", index);
+      send_AT(sendCmd, 1000);
+
+      // Send the actual packet
+      send_data(packet, index);
   }
 
   void ESP01_Send_MQTT_CONNECT(const char *clientID) {
@@ -190,22 +254,65 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   HAL_Delay(2000);
+  
+  // Connect to WiFi
   ESP01_ConnectWiFi("MyTether", "asdfghjkl");
-  ESP01_ConnectMQTTBroker("test.mosquitto.org", 1883);
-
   HAL_Delay(2000);
-
-  ESP01_Send_MQTT_CONNECT("STM32Client");
+  
+  // Check what MQTT commands are supported
+  ESP01_CheckMQTTSupport();
   HAL_Delay(2000);
+  
+  // Try HiveMQ Cloud with built-in MQTT commands
+  ESP01_ConnectMQTTBroker_Auth("b2a051ac43c4410e86861ed01b937dec.s1.eu.hivemq.cloud", 1883, "user1", "P@ssw0rd");
+  HAL_Delay(3000);
+  
+  // If above fails, try manual TCP connection
+  // ESP01_ConnectMQTTBroker("b2a051ac43c4410e86861ed01b937dec.s1.eu.hivemq.cloud", 1883);
+  // HAL_Delay(2000);
+  // ESP01_Send_MQTT_CONNECT_Auth("STM32Client", "user1", "P@ssw0rd");
+  // HAL_Delay(2000);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  uint32_t lastSensorSend = 0;
+  uint16_t sensorCounter = 0;
+  
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    // Send sensor data every 10 seconds
+    if (HAL_GetTick() - lastSensorSend > 10000) {
+        char sensorData[200];
+        
+        // Simulate sensor readings (replace with actual sensor code)
+        int pressure = 700 + (sensorCounter % 200);
+        int soilTemp = 20 + (sensorCounter % 15);
+        int soilHumidity = 50 + (sensorCounter % 40);
+        int waterLevel = 10 + (sensorCounter % 20);
+        int airTemp = 25 + (sensorCounter % 10);
+        int airHumidity = 60 + (sensorCounter % 30);
+        
+        // Format JSON payload
+        snprintf(sensorData, sizeof(sensorData),
+                "{\"pressure\":%d,\"soilTemp\":%d,\"soilHumidity\":%d,\"waterLevel\":%d,\"airTemp\":%d,\"airHumidity\":%d,\"counter\":%d}",
+                pressure, soilTemp, soilHumidity, waterLevel, airTemp, airHumidity, sensorCounter);
+        
+        // Publish to HiveMQ Cloud
+        ESP01_Send_MQTT_PUBLISH("devices/stm32-01/telemetry", sensorData);
+        
+        lastSensorSend = HAL_GetTick();
+        sensorCounter++;
+        
+        // Blink LED to show activity
+        HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+    }
+    
+    HAL_Delay(100); // Small delay to prevent busy waiting
   }
   /* USER CODE END 3 */
 }
