@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "esp8266.h"
+// #include "esp8266.h"
 #include "string.h"
 #include "stdio.h"
 /* USER CODE END Includes */
@@ -43,7 +43,6 @@
 
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart1;
-UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 
@@ -53,7 +52,6 @@ UART_HandleTypeDef huart2;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
-static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -80,6 +78,103 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+  void send_AT_command(const char *cmd, uint32_t delay_ms) {
+      HAL_UART_Transmit(&huart1, (uint8_t *)cmd, strlen(cmd), HAL_MAX_DELAY);
+      HAL_Delay(delay_ms);
+  }
+
+  void send_and_receive(const char *cmd, uint32_t delay_ms) {
+      uint8_t buffer[512] = {0};
+
+      HAL_UART_Transmit(&huart1, (uint8_t *)cmd, strlen(cmd), HAL_MAX_DELAY);
+      HAL_Delay(delay_ms);
+
+      HAL_UART_Receive(&huart1, buffer, sizeof(buffer), 1000);
+      printf("%s\n", buffer); // Display received response on serial terminal
+  }
+
+  void ESP01_ConnectWiFi(const char *ssid, const char *password) {
+      send_and_receive("AT+RST\r\n", 3000);        // Reset ESP
+      HAL_Delay(2000);                             // Wait for boot
+
+      send_and_receive("AT+CWMODE=1\r\n", 1000);   // Set mode: Station (client)
+
+      char wifiCommand[128];
+      snprintf(wifiCommand, sizeof(wifiCommand),
+               "AT+CWJAP=\"%s\",\"%s\"\r\n", ssid, password);
+
+      send_and_receive(wifiCommand, 8000);         // Connect to Wi-Fi network
+  }
+  void send_AT(const char *cmd, uint32_t delay_ms) {
+      HAL_UART_Transmit(&huart1, (uint8_t *)cmd, strlen(cmd), HAL_MAX_DELAY);
+      HAL_Delay(delay_ms);
+  }
+
+  void send_data(uint8_t *data, uint16_t len) {
+      HAL_UART_Transmit(&huart1, data, len, HAL_MAX_DELAY);
+      HAL_Delay(500); // small delay after sending data
+  }
+
+  void ESP01_ConnectMQTTBroker(const char *broker, uint16_t port) {
+      char cmd[128];
+      snprintf(cmd, sizeof(cmd),
+               "AT+CIPSTART=\"TCP\",\"%s\",%d\r\n", broker, port);
+      send_AT(cmd, 5000);
+  }
+
+  void ESP01_Send_MQTT_CONNECT(const char *clientID) {
+      uint8_t packet[128];
+      uint8_t clientID_len = strlen(clientID);
+      uint8_t total_len = 10 + 2 + clientID_len;
+
+      uint8_t index = 0;
+      packet[index++] = 0x10;                      // CONNECT command
+      packet[index++] = total_len;                 // Remaining length
+      packet[index++] = 0x00; packet[index++] = 0x04; // Length of "MQTT"
+      packet[index++] = 'M'; packet[index++] = 'Q';
+      packet[index++] = 'T'; packet[index++] = 'T';
+      packet[index++] = 0x04;                      // Protocol level 4
+      packet[index++] = 0x02;                      // Clean session
+      packet[index++] = 0x00; packet[index++] = 0x3C; // Keep alive = 60 sec
+      packet[index++] = 0x00; packet[index++] = clientID_len;
+      memcpy(&packet[index], clientID, clientID_len);
+      index += clientID_len;
+
+      // Send CIPSEND first
+      char sendCmd[32];
+      snprintf(sendCmd, sizeof(sendCmd),
+               "AT+CIPSEND=%d\r\n", index);
+      send_AT(sendCmd, 1000);
+
+      // Send the actual packet
+      send_data(packet, index);
+  }
+  void ESP01_Send_MQTT_PUBLISH(const char *topic, const char *message) {
+      uint8_t packet[256];
+      uint8_t topic_len = strlen(topic);
+      uint8_t message_len = strlen(message);
+
+      uint8_t remaining_len = 2 + topic_len + message_len;
+      uint8_t index = 0;
+
+      packet[index++] = 0x30;                       // PUBLISH command
+      packet[index++] = remaining_len;              // Remaining length
+      packet[index++] = 0x00;
+      packet[index++] = topic_len;
+      memcpy(&packet[index], topic, topic_len);
+      index += topic_len;
+      memcpy(&packet[index], message, message_len);
+      index += message_len;
+
+      // Send CIPSEND first
+      char sendCmd[32];
+      snprintf(sendCmd, sizeof(sendCmd),
+               "AT+CIPSEND=%d\r\n", index);
+      send_AT(sendCmd, 1000);
+
+      // Send packet data
+      send_data(packet, index);
+  }
 
   /* USER CODE END Init */
 
@@ -93,241 +188,21 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART1_UART_Init();
-  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  
-  // Test basic UART communication first
-  HAL_Delay(1000);  // Wait for UART to stabilize
-  uint8_t testMsg[] = "STM32 Boot Complete - UART Working!\r\n";
-  HAL_UART_Transmit(&huart2, testMsg, strlen((char*)testMsg), 1000);
-  // Blink LED to indicate STM32 is running
-  for(int i = 0; i < 3; i++) {
-    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);    // LED ON
-    HAL_Delay(200);
-    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);  // LED OFF
-    HAL_Delay(200);
-  }
-  uint8_t rxBuffer[512] = {0};
-  uint8_t ATisOK;
-  int channel;
-  int onoff;
-  int led = 1;
-  char ATcommand[64];
-  char ATcommandB[1024];
-  char ATcommandN[100];
-  char ATcommandF[100];
-  char ATcommandT[16];
-  sprintf(ATcommandB,"<!DOCTYPE html><html>\n<head>\n\
-  <title>STM32 - ESP8266</title>\n<link href=\"data:image/x-icon;base64,\
-  A\" rel=\"icon\" type=\"image/x-icon\"><style>\nhtml {\
-  display: inline-block; margin: 0px auto; text-align: center;}\n\
-  body{margin-top: 50px;}\n.button {display: block;\n\
-  width: 70px;\nbackground-color: #008000;\nborder: none;\ncolor: white;\n\
-  padding: 14px 28px;\ntext-decoration: none;\nfont-size: 24px;\n\
-  margin: 0px auto 36px; \nborder-radius: 5px;}\n\
-  .button-on {background-color: #008000;}\n.button-on:active\
-  {background-color: #008000;}\n.button-off {background-color: #808080;}\n\
-  .button-off:active {background-color: #808080;}\n\
-  p {font-size: 14px;color: #808080;margin-bottom: 20px;}\n\
-  </style>\n</head>\n<body>\n<h1>STM32 - ESP8266</h1>");
-  sprintf(ATcommandN,"<p>Light is currently on\
-  </p><a class=\"button button-off\" href=\"/lightoff\">OFF</a>");
-  sprintf(ATcommandF,"<p>Light is currently off\
-  </p><a class=\"button button-on\" href=\"/lighton\">ON</a>");
-  sprintf(ATcommandT,"</body></html>");
-  int countB = strlen(ATcommandB);
-  int countN = strlen(ATcommandN);
-  int countF = strlen(ATcommandF);
-  int countT = strlen(ATcommandT);
+  HAL_Delay(2000);
+  ESP01_ConnectWiFi("MyTether", "asdfghjkl");
+  ESP01_ConnectMQTTBroker("test.mosquitto.org", 1883);
 
-  // Initialize ESP8266
-  uint8_t initMsg[] = "Initializing ESP8266...\r\n";
-  HAL_UART_Transmit(&huart1, initMsg, strlen((char*)initMsg), 1000);
-  
-  sprintf(ATcommand,"AT+RST\r\n");
-  memset(rxBuffer,0,sizeof(rxBuffer));
-  HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-  HAL_UART_Receive (&huart1, rxBuffer, 512, 3000);  // Longer timeout for reset
-  
-  // Print what we received from ESP8266
-  uint8_t debugMsg[] = "ESP8266 Reset Response:\r\n";
-  HAL_UART_Transmit(&huart1, debugMsg, strlen((char*)debugMsg), 1000);
-  HAL_UART_Transmit(&huart1, rxBuffer, strlen((char*)rxBuffer), 1000);
-  
-  HAL_Delay(2000);  // Give ESP8266 time to boot
-  
-  // Print startup message
-  uint8_t startMsg[] = "STM32-ESP8266 WiFi CCU Starting...\r\n";
-  HAL_UART_Transmit(&huart1, startMsg, strlen((char*)startMsg), 1000);
+  HAL_Delay(2000);
 
-  ATisOK = 0;
-  while(!ATisOK){
-    sprintf(ATcommand,"AT+CWMODE=1\r\n");  // Set to Station mode to connect to WiFi
-      memset(rxBuffer,0,sizeof(rxBuffer));
-      HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-      HAL_UART_Receive (&huart1, rxBuffer, 512, 1000);
-    if(strstr((char *)rxBuffer,"OK")){
-      ATisOK = 1;
-      // Print confirmation
-      sprintf(ATcommand,"ESP8266: Station mode set\r\n");
-      HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-    }
-    HAL_Delay(500);
-  }
-
-  ATisOK = 0;
-  while(!ATisOK){
-    sprintf(ATcommand,"AT+CWJAP=\"MyTether\",\"asdfghjkl\"\r\n");  // Connect to phone hotspot
-      memset(rxBuffer,0,sizeof(rxBuffer));
-      HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-      HAL_UART_Receive (&huart1, rxBuffer, 512, 5000);  // Longer timeout for connection
-    if(strstr((char *)rxBuffer,"WIFI CONNECTED")){
-      ATisOK = 1;
-      // Print confirmation
-      sprintf(ATcommand,"ESP8266: Connected to WiFi!\r\n");
-      HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-    }
-    HAL_Delay(1000);
-  }
-
-  // Get IP address after WiFi connection
-  sprintf(ATcommand,"AT+CIFSR\r\n");
-  memset(rxBuffer,0,sizeof(rxBuffer));
-  HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-  HAL_UART_Receive (&huart1, rxBuffer, 512, 1000);
-  
-  // Extract and print IP address (look for IP pattern like "192.168.1.100")
-  char ipAddress[20] = {0};
-  char *ipStart = strstr((char*)rxBuffer, "+CIFSR:STAIP,\"");
-  if (ipStart) {
-    ipStart += 14; // Skip "+CIFSR:STAIP,\""
-    char *ipEnd = strchr(ipStart, '"');
-    if (ipEnd) {
-      int ipLen = ipEnd - ipStart;
-      if (ipLen < sizeof(ipAddress) - 1) {
-        strncpy(ipAddress, ipStart, ipLen);
-        ipAddress[ipLen] = '\0';
-      }
-    }
-  }
-  
-  // Print IP address
-  sprintf(ATcommand,"IP Address: %s\r\n", ipAddress);
-  HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-  HAL_Delay(1000);
-
-  ATisOK = 0;
-  while(!ATisOK){
-    sprintf(ATcommand,"AT+CIPMUX=1\r\n");
-      memset(rxBuffer,0,sizeof(rxBuffer));
-      HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-      HAL_UART_Receive (&huart1, rxBuffer, 512, 1000);
-      if(strstr((char *)rxBuffer,"OK")){
-        ATisOK = 1;
-      }
-      HAL_Delay(500);
-  }
-
-  ATisOK = 0;
-  while(!ATisOK){
-    sprintf(ATcommand,"AT+CIPSERVER=1,80\r\n");
-    memset(rxBuffer,0,sizeof(rxBuffer));
-    HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-    HAL_UART_Receive (&huart1, rxBuffer, 512, 1000);
-    if(strstr((char *)rxBuffer,"OK")){
-        ATisOK = 1;
-    }
-    HAL_Delay(500);
-  }
-	// Test ESP01 basic communication first
-	sprintf(ATcommand,"Testing ESP8266 connection...\r\n");
-	HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-	
-	if (ESP_TestConnection()) {
-		// ESP01 is responding, proceed with full initialization
-		sprintf(ATcommand,"ESP8266 responding, initializing...\r\n");
-		HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-		
-		if (ESP_Init()) {
-			// ESP01 initialized successfully
-			sprintf(ATcommand,"ESP8266 initialization successful!\r\n");
-			HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-		} else {
-			// ESP01 initialization failed
-			sprintf(ATcommand,"ESP8266 initialization failed!\r\n");
-			HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-		}
-	} else {
-		// ESP01 not responding - check connections and power
-		sprintf(ATcommand,"ESP8266 not responding - check connections!\r\n");
-		HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-	}
-
+  ESP01_Send_MQTT_CONNECT("STM32Client");
+  HAL_Delay(2000);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
-  {memset(rxBuffer,0,sizeof(rxBuffer));
-  HAL_UART_Receive (&huart1, rxBuffer, 512, 1000);
-  if(strstr((char *)rxBuffer,"+IPD,0")) channel = 0;
-  else if(strstr((char *)rxBuffer,"+IPD,1")) channel = 1;
-  else if(strstr((char *)rxBuffer,"+IPD,2")) channel = 2;
-  else if(strstr((char *)rxBuffer,"+IPD,3")) channel = 3;
-  else if(strstr((char *)rxBuffer,"+IPD,4")) channel = 4;
-  else if(strstr((char *)rxBuffer,"+IPD,5")) channel = 5;
-  else if(strstr((char *)rxBuffer,"+IPD,6")) channel = 6;
-  else if(strstr((char *)rxBuffer,"+IPD,7")) channel = 7;
-  else channel = 100;
-
-  if(strstr((char *)rxBuffer,"GET /lighton")) onoff = 0;
-  else if(strstr((char *)rxBuffer,"GET /lightoff")) onoff = 1;
-  else onoff = led;
-
-  if(channel<8 && onoff == 1)
   {
-    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
-    led = 1;
-    sprintf(ATcommand,"AT+CIPSEND=%d,%d\r\n",channel,countB+countF+countT);
-    memset(rxBuffer,0,sizeof(rxBuffer));
-    HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-    HAL_UART_Receive (&huart1, rxBuffer, 512, 100);
-    if(strstr((char *)rxBuffer,">"))
-    {
-      memset(rxBuffer,0,sizeof(rxBuffer));
-        HAL_UART_Transmit(&huart1,(uint8_t *)ATcommandB,countB,1000);
-        HAL_UART_Transmit(&huart1,(uint8_t *)ATcommandF,countF,1000);
-        HAL_UART_Transmit(&huart1,(uint8_t *)ATcommandT,countT,1000);
-       HAL_UART_Receive (&huart1, rxBuffer, 512, 100);
-    }
-    sprintf(ATcommand,"AT+CIPCLOSE=%d\r\n",channel);
-    memset(rxBuffer,0,sizeof(rxBuffer));
-    HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-    HAL_UART_Receive (&huart1, rxBuffer, 512, 100);
-    channel=100;
-  }
-  else if(channel<8 && onoff == 0)
-  {
-    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
-    led = 0;
-    sprintf(ATcommand,"AT+CIPSEND=%d,%d\r\n",channel,countB+countN+countT);
-    memset(rxBuffer,0,sizeof(rxBuffer));
-    HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-    HAL_UART_Receive (&huart1, rxBuffer, 512, 100);
-    if(strstr((char *)rxBuffer,">"))
-    {
-      memset(rxBuffer,0,sizeof(rxBuffer));
-        HAL_UART_Transmit(&huart1,(uint8_t *)ATcommandB,countB,1000);
-        HAL_UART_Transmit(&huart1,(uint8_t *)ATcommandN,countN,1000);
-        HAL_UART_Transmit(&huart1,(uint8_t *)ATcommandT,countT,1000);
-        HAL_UART_Receive (&huart1, rxBuffer, 512, 100);
-    }
-    sprintf(ATcommand,"AT+CIPCLOSE=%d\r\n",channel);
-    memset(rxBuffer,0,sizeof(rxBuffer));
-    HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-    HAL_UART_Receive (&huart1, rxBuffer, 512, 100);
-    channel=100;
-  }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -411,39 +286,6 @@ static void MX_USART1_UART_Init(void)
   /* USER CODE BEGIN USART1_Init 2 */
 
   /* USER CODE END USART1_Init 2 */
-
-}
-
-/**
-  * @brief USART2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART2_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART2_Init 0 */
-
-  /* USER CODE END USART2_Init 0 */
-
-  /* USER CODE BEGIN USART2_Init 1 */
-
-  /* USER CODE END USART2_Init 1 */
-  huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
-  huart2.Init.WordLength = UART_WORDLENGTH_8B;
-  huart2.Init.StopBits = UART_STOPBITS_1;
-  huart2.Init.Parity = UART_PARITY_NONE;
-  huart2.Init.Mode = UART_MODE_TX_RX;
-  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART2_Init 2 */
-
-  /* USER CODE END USART2_Init 2 */
 
 }
 
