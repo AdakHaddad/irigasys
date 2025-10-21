@@ -43,6 +43,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 
@@ -52,6 +53,7 @@ UART_HandleTypeDef huart1;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -91,7 +93,20 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART1_UART_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  
+  // Test basic UART communication first
+  HAL_Delay(1000);  // Wait for UART to stabilize
+  uint8_t testMsg[] = "STM32 Boot Complete - UART Working!\r\n";
+  HAL_UART_Transmit(&huart2, testMsg, strlen((char*)testMsg), 1000);
+  // Blink LED to indicate STM32 is running
+  for(int i = 0; i < 3; i++) {
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);    // LED ON
+    HAL_Delay(200);
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);  // LED OFF
+    HAL_Delay(200);
+  }
   uint8_t rxBuffer[512] = {0};
   uint8_t ATisOK;
   int channel;
@@ -125,47 +140,81 @@ int main(void)
   int countF = strlen(ATcommandF);
   int countT = strlen(ATcommandT);
 
+  // Initialize ESP8266
+  uint8_t initMsg[] = "Initializing ESP8266...\r\n";
+  HAL_UART_Transmit(&huart1, initMsg, strlen((char*)initMsg), 1000);
+  
   sprintf(ATcommand,"AT+RST\r\n");
   memset(rxBuffer,0,sizeof(rxBuffer));
   HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-  HAL_UART_Receive (&huart1, rxBuffer, 512, 100);
-  HAL_Delay(500);
+  HAL_UART_Receive (&huart1, rxBuffer, 512, 3000);  // Longer timeout for reset
+  
+  // Print what we received from ESP8266
+  uint8_t debugMsg[] = "ESP8266 Reset Response:\r\n";
+  HAL_UART_Transmit(&huart1, debugMsg, strlen((char*)debugMsg), 1000);
+  HAL_UART_Transmit(&huart1, rxBuffer, strlen((char*)rxBuffer), 1000);
+  
+  HAL_Delay(2000);  // Give ESP8266 time to boot
+  
+  // Print startup message
+  uint8_t startMsg[] = "STM32-ESP8266 WiFi CCU Starting...\r\n";
+  HAL_UART_Transmit(&huart1, startMsg, strlen((char*)startMsg), 1000);
 
   ATisOK = 0;
   while(!ATisOK){
-    sprintf(ATcommand,"AT+CWMODE_CUR=2\r\n");
+    sprintf(ATcommand,"AT+CWMODE=1\r\n");  // Set to Station mode to connect to WiFi
       memset(rxBuffer,0,sizeof(rxBuffer));
       HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
       HAL_UART_Receive (&huart1, rxBuffer, 512, 1000);
     if(strstr((char *)rxBuffer,"OK")){
       ATisOK = 1;
+      // Print confirmation
+      sprintf(ATcommand,"ESP8266: Station mode set\r\n");
+      HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
     }
     HAL_Delay(500);
   }
 
   ATisOK = 0;
   while(!ATisOK){
-    sprintf(ATcommand,"AT+CWSAP_CUR=\"MyTether\",\"asdfghjkl\",1,3,4,0\r\n");
+    sprintf(ATcommand,"AT+CWJAP=\"MyTether\",\"asdfghjkl\"\r\n");  // Connect to phone hotspot
       memset(rxBuffer,0,sizeof(rxBuffer));
       HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-      HAL_UART_Receive (&huart1, rxBuffer, 512, 1000);
-    if(strstr((char *)rxBuffer,"OK")){
+      HAL_UART_Receive (&huart1, rxBuffer, 512, 5000);  // Longer timeout for connection
+    if(strstr((char *)rxBuffer,"WIFI CONNECTED")){
       ATisOK = 1;
+      // Print confirmation
+      sprintf(ATcommand,"ESP8266: Connected to WiFi!\r\n");
+      HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
     }
-    HAL_Delay(500);
+    HAL_Delay(1000);
   }
 
-  ATisOK = 0;
-  while(!ATisOK){
-    sprintf(ATcommand,"AT+CIPAP_CUR=\"10.197.186.242\"\r\n");
-    memset(rxBuffer,0,sizeof(rxBuffer));
-    HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
-    HAL_UART_Receive (&huart1, rxBuffer, 512, 1000);
-    if(strstr((char *)rxBuffer,"OK")){
-      ATisOK = 1;
+  // Get IP address after WiFi connection
+  sprintf(ATcommand,"AT+CIFSR\r\n");
+  memset(rxBuffer,0,sizeof(rxBuffer));
+  HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
+  HAL_UART_Receive (&huart1, rxBuffer, 512, 1000);
+  
+  // Extract and print IP address (look for IP pattern like "192.168.1.100")
+  char ipAddress[20] = {0};
+  char *ipStart = strstr((char*)rxBuffer, "+CIFSR:STAIP,\"");
+  if (ipStart) {
+    ipStart += 14; // Skip "+CIFSR:STAIP,\""
+    char *ipEnd = strchr(ipStart, '"');
+    if (ipEnd) {
+      int ipLen = ipEnd - ipStart;
+      if (ipLen < sizeof(ipAddress) - 1) {
+        strncpy(ipAddress, ipStart, ipLen);
+        ipAddress[ipLen] = '\0';
+      }
     }
-    HAL_Delay(500);
   }
+  
+  // Print IP address
+  sprintf(ATcommand,"IP Address: %s\r\n", ipAddress);
+  HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
+  HAL_Delay(1000);
 
   ATisOK = 0;
   while(!ATisOK){
@@ -191,18 +240,27 @@ int main(void)
     HAL_Delay(500);
   }
 	// Test ESP01 basic communication first
+	sprintf(ATcommand,"Testing ESP8266 connection...\r\n");
+	HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
+	
 	if (ESP_TestConnection()) {
 		// ESP01 is responding, proceed with full initialization
+		sprintf(ATcommand,"ESP8266 responding, initializing...\r\n");
+		HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
+		
 		if (ESP_Init()) {
 			// ESP01 initialized successfully
-			// You can add LED indication or other success indicators here
+			sprintf(ATcommand,"ESP8266 initialization successful!\r\n");
+			HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
 		} else {
 			// ESP01 initialization failed
-			// You can add error handling here (LED blink, retry logic, etc.)
+			sprintf(ATcommand,"ESP8266 initialization failed!\r\n");
+			HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
 		}
 	} else {
 		// ESP01 not responding - check connections and power
-		// You can add error handling here
+		sprintf(ATcommand,"ESP8266 not responding - check connections!\r\n");
+		HAL_UART_Transmit(&huart1,(uint8_t *)ATcommand,strlen(ATcommand),1000);
 	}
 
   /* USER CODE END 2 */
@@ -275,7 +333,7 @@ int main(void)
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
-
+}
 
 /**
   * @brief System Clock Configuration
@@ -353,6 +411,39 @@ static void MX_USART1_UART_Init(void)
   /* USER CODE BEGIN USART1_Init 2 */
 
   /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
 
 }
 
